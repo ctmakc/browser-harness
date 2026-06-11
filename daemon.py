@@ -175,7 +175,7 @@ class Daemon:
         params = req.get("params") or {}
         # Browser-level Target.* calls must not use a session (stale or otherwise).
         # For everything else, explicit session in req wins; else default.
-        sid = None if method.startswith("Target.") else (req.get("session_id") or self.session)
+        sid = None if method.startswith(("Target.", "Browser.")) else (req.get("session_id") or self.session)
         try:
             return {"result": await self.cdp.send_raw(method, params, session_id=sid)}
         except Exception as e:

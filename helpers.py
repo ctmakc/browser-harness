@@ -143,6 +143,32 @@ def new_tab(url="about:blank"):
         goto(url)
     return tid
 
+def background_tab(url="about:blank"):
+    """Open and attach to a new tab WITHOUT stealing focus from the user.
+
+    The tab is created and navigated invisibly — Chrome never brings it to the front.
+    Daemon session switches to this tab so all helpers (goto, js, screenshot, …) work normally.
+    Returns (target_id, session_id).
+
+    Typical pattern:
+        saved = current_tab()
+        tid, sid = background_tab("https://example.com")
+        wait_for_load()
+        data = js("document.body.innerText")
+        close_tab(tid)
+        switch_tab(saved["targetId"])   # restore user's visible tab
+    """
+    tid = cdp("Target.createTarget", url="about:blank")["targetId"]
+    sid = cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
+    _send({"meta": "set_session", "session_id": sid})
+    if url != "about:blank":
+        goto(url)
+    return tid, sid
+
+def close_tab(target_id):
+    """Close a tab by target ID (works for any tab, including background ones)."""
+    cdp("Target.closeTarget", targetId=target_id)
+
 def ensure_real_tab():
     """Switch to a real user tab if current is chrome:// / internal / stale."""
     tabs = list_tabs(include_chrome=False)
