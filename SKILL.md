@@ -5,6 +5,10 @@ description: Direct browser control via CDP. Use when the user wants to automate
 
 # browser-harness
 
+> **Chrome владельца закрыт для агентов (22.09.2026).** Анкеты, формы, регистрации, заявки, любые сайты без его личного логина → `tanya-harness <<'PY' ... PY` (те же helpers, Chrome Тани на claw). `browser-harness` из агентской сессии без `BH_OWNER_WHY="…"` отвечает кодом 64. Причину ставить только когда нужен именно залогиненный кабинет владельца; каждый такой запуск пишется в `~/.local/state/browser-harness/owner-chrome.log`.
+
+> **Своя вкладка на агента (22.09.2026).** Демон узнаёт агента по `BU_AGENT` / `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `TMUX_PANE` и держит ему свою текущую вкладку: чужой `switch_tab` её больше не уводит. В Chrome Тани (`BU_AGENT_WINDOW=1`) у каждого агента своё окно. В Chrome владельца агентская вкладка фоновая, `switch_tab` её на передний план не выдёргивает (`BU_ACTIVATE=0`). Закрыл вспомогательную вкладку → следующая команда вернётся в свою основную. Вкладки агентов, простоявших 30 мин, демон закрывает сам. `ensure_real_tab()` у агента остаётся в своей вкладке. Без id (кроны) — старая общая вкладка. Очередь flock остаётся: один скрипт за раз на браузер.
+
 Easiest and most powerful way to interact with the browser. **Read this file in full before using or editing the harness** — it has to be in context.
 
 ## Fast start
@@ -62,6 +66,16 @@ PY
 `start_remote_daemon` prints `liveUrl` and auto-opens it in the local browser (if a GUI is detected) so the user can watch along. Headless servers print only — share the URL with the user. The daemon `PATCH`es the cloud browser to `stop` on shutdown, which persists profile state. Running remote daemons bill until timeout.
 
 Profiles (cookies-only login state) live in `interaction-skills/profile-sync.md` — covers `list_cloud_profiles()`, the chat-driven "which profile?" pattern, and `sync_local_profile()` for uploading a local Chrome profile.
+
+### Which browser (rule of 09.09.2026)
+
+- **Public web** (Google, participant sites, anything that needs no login of the owner): do NOT use this harness — it drives the owner's personal Chrome and steals the cursor. Use `mcp__playwright__*` (invisible agent Chrome :9333) or WebFetch/WebSearch.
+- **Facebook / Instagram / persona Tanya's sessions**: `tanya-harness <<'PY' ... PY` — same helpers, the script is sent over SSH to claw (10.0.0.141), where her Chrome (:9335, logged in) lives. Never open FB/IG in the owner's Chrome for research.
+- **Owner's logged-in sessions** (Cloudflare, Google Console, adm.tools, …) on the owner's explicit request only: plain `browser-harness`.
+
+### Queue
+
+`browser-harness` and `tanya-harness` hold `flock /tmp/bu-<BU_NAME>.lock` for the whole script: one script per profile at a time, others wait up to `BU_LOCK_WAIT` (900 s), then exit 75 ("did not get the browser", not "browser broken"). Keep scripts short, close every tab you opened in the same script (`close_tab`), and never spin a second driver on the same profile.
 
 ## Search first
 

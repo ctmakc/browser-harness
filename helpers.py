@@ -20,10 +20,15 @@ _load_env()
 
 NAME = os.environ.get("BU_NAME", "default")
 SOCK = f"/tmp/bu-{NAME}.sock"
+# Кто шлёт скрипт: у каждого агента своя вкладка в демоне (daemon.py, _agent_tab).
+# Без id (кроны, ручной запуск) — старая общая вкладка.
+AGENT = next((os.environ[k] for k in ("BU_AGENT", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "TMUX_PANE") if os.environ.get(k)), None)
+ACTIVATE = os.environ.get("BU_ACTIVATE", "1") != "0"
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 
 
 def _send(req):
+    if AGENT: req = {**req, "agent": AGENT}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(SOCK)
     s.sendall((json.dumps(req) + "\n").encode())
@@ -115,7 +120,8 @@ def list_tabs(include_chrome=True):
     return out
 
 def current_tab():
-    t = cdp("Target.getTargetInfo").get("targetInfo", {})
+    tid = _send({"meta": "target"}).get("target_id") if AGENT else None
+    t = (cdp("Target.getTargetInfo", targetId=tid) if tid else cdp("Target.getTargetInfo")).get("targetInfo", {})
     return {"targetId": t.get("targetId"), "url": t.get("url", ""), "title": t.get("title", "")}
 
 def _mark_tab():
@@ -127,9 +133,9 @@ def switch_tab(target_id):
     # Unmark old tab
     try: cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F7E2 '))document.title=document.title.slice(2)")
     except Exception: pass
-    cdp("Target.activateTarget", targetId=target_id)
+    if ACTIVATE: cdp("Target.activateTarget", targetId=target_id)
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
-    _send({"meta": "set_session", "session_id": sid})
+    _send({"meta": "set_session", "session_id": sid, "target_id": target_id})
     _mark_tab()
     return sid
 
@@ -160,7 +166,7 @@ def background_tab(url="about:blank"):
     """
     tid = cdp("Target.createTarget", url="about:blank")["targetId"]
     sid = cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
-    _send({"meta": "set_session", "session_id": sid})
+    _send({"meta": "set_session", "session_id": sid, "target_id": tid})
     if url != "about:blank":
         goto(url)
     return tid, sid
@@ -170,7 +176,10 @@ def close_tab(target_id):
     cdp("Target.closeTarget", targetId=target_id)
 
 def ensure_real_tab():
-    """Switch to a real user tab if current is chrome:// / internal / stale."""
+    """Switch to a real user tab if current is chrome:// / internal / stale.
+    У агента (AGENT) своя вкладка — остаётся в ней, чужие не трогает."""
+    if AGENT:
+        return current_tab()
     tabs = list_tabs(include_chrome=False)
     if not tabs:
         return None
