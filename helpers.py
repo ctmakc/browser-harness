@@ -30,6 +30,7 @@ INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension
 def _send(req):
     if AGENT: req = {**req, "agent": AGENT}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(float(os.environ.get("BU_CALL_TIMEOUT", "60")) + 30)  # демон сам режет вызов на BU_CALL_TIMEOUT
     s.connect(SOCK)
     s.sendall((json.dumps(req) + "\n").encode())
     data = b""

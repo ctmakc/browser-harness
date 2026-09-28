@@ -31,6 +31,9 @@ BUF = 500
 # вкладка, окно владельца не дёргается. Вкладки простоявших агентов закрываются через AGENT_IDLE.
 AGENT_WINDOW = os.environ.get("BU_AGENT_WINDOW") == "1"
 AGENT_IDLE = int(os.environ.get("BU_AGENT_IDLE", "1800"))
+# Потолок на один CDP-вызов. Без него вкладка с зависшим рендерером (FB messenger на 5 ГБ,
+# 28.09) вешала клиента навсегда, а тот держал flock очереди tanya-harness.
+CALL_TIMEOUT = float(os.environ.get("BU_CALL_TIMEOUT", "60"))
 PROFILES = [
     Path.home() / "Library/Application Support/Google/Chrome",
     Path.home() / "Library/Application Support/Microsoft Edge",
@@ -173,8 +176,8 @@ class Daemon:
         if a: return a
         params = {"url": "about:blank", "background": True}
         if AGENT_WINDOW: params["newWindow"] = True
-        tid = (await self.cdp.send_raw("Target.createTarget", params))["targetId"]
-        sid = (await self.cdp.send_raw("Target.attachToTarget", {"targetId": tid, "flatten": True}))["sessionId"]
+        tid = (await asyncio.wait_for(self.cdp.send_raw("Target.createTarget", params), timeout=20))["targetId"]
+        sid = (await asyncio.wait_for(self.cdp.send_raw("Target.attachToTarget", {"targetId": tid, "flatten": True}), timeout=20))["sessionId"]
         await self._enable(sid)
         a = self.agents[agent] = {"sid": sid, "tid": tid, "own": tid, "last": time.time()}
         log(f"agent {agent[:12]}: own tab {tid} window={AGENT_WINDOW}")
@@ -227,7 +230,16 @@ class Daemon:
         default = a["sid"] if a else self.session
         sid = None if browser_level else (req.get("session_id") or default)
         try:
-            return {"result": await self.cdp.send_raw(method, params, session_id=sid)}
+            return {"result": await asyncio.wait_for(self.cdp.send_raw(method, params, session_id=sid), timeout=CALL_TIMEOUT)}
+        except asyncio.TimeoutError:
+            log(f"timeout {CALL_TIMEOUT:.0f}s: {method} session={sid}")
+            if a and sid == a.get("sid"):
+                # Вкладка не отвечает: закрываем её, следующий вызов агента получит свежую.
+                self.agents.pop(agent, None)
+                for t in {a.get("tid"), a.get("own")} - {None}:
+                    try: await asyncio.wait_for(self.cdp.send_raw("Target.closeTarget", {"targetId": t}), timeout=5)
+                    except Exception: pass
+            return {"error": f"CDP {method} timed out after {CALL_TIMEOUT:.0f}s (tab hung?)"}
         except Exception as e:
             msg = str(e)
             if "Session with given id not found" in msg and a and sid == a["sid"]:
