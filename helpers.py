@@ -212,8 +212,9 @@ def human_pause(lo=0.8, hi=2.5):
     import random; time.sleep(random.uniform(lo, hi))
 
 def finish_task():
-    """Конец ЗАДАЧИ (не скрипта): закрыть свою вкладку. Следующий вызов создаст новую."""
-    if AGENT: close_tab(current_tab()["targetId"])
+    """Конец ЗАДАЧИ (не скрипта): увести свою вкладку на about:blank (страница выгружается).
+    Саму вкладку не закрываем: демон помнит её id, а простоявшую 30 мин закроет сам."""
+    if AGENT: goto("about:blank")
 
 def iframe_target(url_substr):
     """First iframe target whose URL contains `url_substr`. Use with js(..., target_id=...)."""
