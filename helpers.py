@@ -54,7 +54,20 @@ def drain_events():  return _send({"meta": "drain_events"})["events"]
 
 # --- navigation / page ---
 def goto(url):
-    r = cdp("Page.navigate", url=url)
+    # Page.navigate висит, пока открыт диалог beforeunload («уйти без сохранения?» — LinkedIn admin/edit
+    # и любые формы). Агент уходит со страницы намеренно, поэтому такой диалог принимаем сами.
+    import threading
+    res = {}
+    def nav():
+        try: res["r"] = cdp("Page.navigate", url=url)
+        except Exception as e: res["e"] = e
+    th = threading.Thread(target=nav, daemon=True); th.start(); th.join(2)
+    if th.is_alive():
+        try: cdp("Page.handleJavaScriptDialog", accept=True)
+        except Exception: pass
+        th.join(float(os.environ.get("BU_CALL_TIMEOUT", "60")))
+    if "e" in res: raise res["e"]
+    r = res.get("r", {})
     d = (Path(__file__).parent / "domain-skills" / (urlparse(url).hostname or "").removeprefix("www.").split(".")[0])
     return {**r, "domain_skills": sorted(p.name for p in d.rglob("*.md"))[:10]} if d.is_dir() else r
 
