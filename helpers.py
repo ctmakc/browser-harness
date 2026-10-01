@@ -193,6 +193,28 @@ def ensure_real_tab():
     switch_tab(tabs[0]["targetId"])
     return tabs[0]
 
+def open_url(url, match=None, reload=False):
+    """Открыть страницу как человек: если своя вкладка уже на ней — НИЧЕГО не грузить.
+    match — подстрока URL, по которой страница считается «той же» (по умолчанию url без #/хвостового /).
+    Агенту (AGENT) не нужны new_tab/close_tab на каждый скрипт: демон держит ему одну фоновую вкладку
+    между скриптами. Без AGENT (кроны) — новая вкладка, чтобы не затереть активную вкладку пользователя."""
+    if not AGENT:
+        new_tab(url); wait_for_load(); return {"reused": False, "url": url}
+    cur = current_tab().get("url", "")
+    key = match or url.split("#")[0].rstrip("/")
+    if not reload and cur and key in cur:
+        return {"reused": True, "url": cur}
+    goto(url); wait_for_load()
+    return {"reused": False, "url": url}
+
+def human_pause(lo=0.8, hi=2.5):
+    """Случайная пауза между действиями, чтобы ритм был человеческим."""
+    import random; time.sleep(random.uniform(lo, hi))
+
+def finish_task():
+    """Конец ЗАДАЧИ (не скрипта): закрыть свою вкладку. Следующий вызов создаст новую."""
+    if AGENT: close_tab(current_tab()["targetId"])
+
 def iframe_target(url_substr):
     """First iframe target whose URL contains `url_substr`. Use with js(..., target_id=...)."""
     for t in cdp("Target.getTargets")["targetInfos"]:
