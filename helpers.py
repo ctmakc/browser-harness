@@ -277,6 +277,36 @@ def upload_file(selector, path):
     if not nid: raise RuntimeError(f"no element for {selector}")
     cdp("DOM.setFileInputFiles", files=[path] if isinstance(path, str) else list(path), nodeId=nid)
 
+def download(trigger, dest_dir=None, timeout=120.0):
+    """Скачать файл через этот Chrome, не ломая загрузки владельца.
+    trigger — функция, запускающая скачивание (click/js/goto). Возвращает путь к файлу в dest_dir.
+    Папка загрузок Chrome глобальная и из UI не видна: перестановка живёт до конца процесса Chrome,
+    и файлы ВЛАДЕЛЬЦА молча уходят в папку агента. Поэтому перестановка только здесь, на время одной
+    загрузки, и возврат в default в finally (демон дублирует: по завершении, по таймеру, сторожем).
+    Сырой cdp('Browser.setDownloadBehavior', behavior='allow', downloadPath=...) в скриптах запрещён."""
+    import shutil, tempfile
+    dest_dir = dest_dir or os.path.join(tempfile.gettempdir(), "bh-downloads", (AGENT or "manual")[:12])
+    os.makedirs(dest_dir, exist_ok=True)
+    known = {d["guid"] for d in _send({"meta": "downloads"})["downloads"]}
+    cdp("Browser.setDownloadBehavior", behavior="allowAndName", downloadPath=dest_dir, eventsEnabled=True)
+    try:
+        trigger()
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            for d in _send({"meta": "downloads"})["downloads"]:
+                if d["guid"] in known: continue
+                if d.get("state") == "canceled": raise RuntimeError(f"download canceled: {d.get('url')}")
+                if d.get("state") == "completed":
+                    src = d.get("filePath") or os.path.join(dest_dir, d["guid"])
+                    dst = os.path.join(dest_dir, d.get("suggestedFilename") or d["guid"])
+                    if src != dst and os.path.exists(src): shutil.move(src, dst)
+                    return dst
+            time.sleep(0.5)
+        raise TimeoutError(f"download did not finish in {timeout:.0f}s (dest {dest_dir})")
+    finally:
+        cdp("Browser.setDownloadBehavior", behavior="default", eventsEnabled=True)
+
+
 def http_get(url, headers=None, timeout=20.0):
     """Pure HTTP — no browser. Use for static pages / APIs. Wrap in ThreadPoolExecutor for bulk."""
     import urllib.request, gzip

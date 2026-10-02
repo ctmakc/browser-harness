@@ -90,6 +90,15 @@ Profiles (cookies-only login state) live in `interaction-skills/profile-sync.md`
 
 `browser-harness` and `tanya-harness` hold `flock /tmp/bu-<BU_NAME>.lock` for the whole script: one script per profile at a time, others wait up to `BU_LOCK_WAIT` (900 s), then exit 75 ("did not get the browser", not "browser broken"). Keep scripts short. Your own agent tab survives between scripts, so the next script continues on the same page (`open_url`). Close the tab once, at the end of the task (`finish_task()`), and close any extra helper tab you opened yourself. Never spin a second driver on the same profile.
 
+### Downloads (закон владельца 25.07, повтор 02.10.2026)
+
+Папка загрузок Chrome, переставленная через CDP (`Browser.setDownloadBehavior allow/allowAndName` + `downloadPath`), глобальна, живёт до перезапуска Chrome и из UI не видна. Дважды загрузки владельца сутками молча падали в каталоги агентов (`/tmp/.../scratchpad`, `~/.config/mega-vpn`), а Chrome при `allow` ещё и не показывает их в панели — владелец видит «файл не скачался». Поэтому:
+
+- Скачивание только через `download(trigger, dest_dir=None, timeout=120)` из `helpers.py`: `path = download(lambda: click(x, y))`. Помощник переставляет папку на одну загрузку и возвращает `default` в `finally`.
+- Сырой `cdp("Browser.setDownloadBehavior", behavior="allow", ...)` в скриптах запрещён. Если файл отдаёт обычный URL с куками — `js("fetch(url).then(r=>r.blob())…")` + base64, без перестановки вовсе.
+- Демон страхует четырьмя слоями: на старте ставит `default`; возвращает `default`, как только агентская загрузка завершилась (`Browser.downloadProgress`); потолок `BU_DL_RESET_SEC` (120 с) с последней перестановки; сторож `BU_DL_GUARD_SEC` (60 с) подтверждает `default`, пока никто через демон перестановку не держит — лечит и прямые подключения к CDP мимо демона.
+- Диагностика: `downloads.target_path` в копии `~/.config/google-chrome/Default/History` (sqlite) — сразу видно чужой путь. Лог демона: `grep "download behavior" /tmp/bu-default.log`.
+
 ## Search first
 
 After cloning the repo, search `domain-skills/` first for the domain you are working on before inventing a new approach.
