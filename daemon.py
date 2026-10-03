@@ -58,10 +58,15 @@ BU_API = "https://api.browser-use.com/api/v3"
 REMOTE_ID = os.environ.get("BU_BROWSER_ID")
 API_KEY = os.environ.get("BROWSER_USE_API_KEY")
 
-
+# Любой Browser/Page.setDownloadBehavior (даже behavior=default) навсегда, до перезапуска Chrome,
+# подменяет менеджер загрузок профиля на DevToolsDownloadManagerDelegate. Тот не переопределяет
+# OpenDownload/ShowDownloadInShell — «Открыть» и «Показать в папке» в Chrome молча перестают работать
+# (content/browser/devtools/protocol/devtools_download_manager_delegate.h; проверено 02.10.2026).
+# На личном Chrome владельца (локальный профиль, BU_NAME=default) вызов запрещён.
 DL_METHODS = ("Browser.setDownloadBehavior", "Page.setDownloadBehavior")
-DL_RESET_SEC = int(os.environ.get("BU_DL_RESET_SEC", "120"))   # потолок жизни перестановки папки
-DL_GUARD_SEC = int(os.environ.get("BU_DL_GUARD_SEC", "60"))    # сторож: лечит перестановку мимо демона
+OWNER_CHROME = NAME == "default" and not os.environ.get("BU_CDP_WS") and not REMOTE_ID
+DL_BLOCKED = ("setDownloadBehavior запрещён на Chrome владельца: ломает «Открыть»/«Показать в папке» до перезапуска Chrome. "
+              "Качай helpers.fetch_file(url) или download(trigger) — они берут байты через fetch страницы.")
 
 
 def log(msg):
@@ -122,9 +127,6 @@ class Daemon:
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
-        self.dl_reset = None     # таймер возврата папки загрузок в default
-        self.dl_override = False # агент переставил папку загрузок и она ещё не возвращена
-        self.downloads = {}      # guid -> {url, suggestedFilename, state, receivedBytes, totalBytes, filePath}
 
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
@@ -163,16 +165,6 @@ class Daemon:
         mark_js = "if(!document.title.startsWith('\U0001F7E2'))document.title='\U0001F7E2 '+document.title"
         async def tap(method, params, session_id=None):
             self.events.append({"method": method, "params": params, "session_id": session_id})
-            if method == "Browser.downloadWillBegin":
-                self.downloads[params["guid"]] = {"guid": params["guid"], "url": params.get("url"),
-                    "suggestedFilename": params.get("suggestedFilename"), "state": "inProgress", "started": time.time()}
-                while len(self.downloads) > 50: self.downloads.pop(next(iter(self.downloads)))
-            elif method == "Browser.downloadProgress":
-                d = self.downloads.setdefault(params["guid"], {"guid": params["guid"], "started": time.time()})
-                d.update({k: params[k] for k in ("state", "receivedBytes", "totalBytes", "filePath") if k in params})
-                if params.get("state") in ("completed", "canceled") and self.dl_override \
-                        and not any(x.get("state") == "inProgress" for x in self.downloads.values()):
-                    asyncio.ensure_future(self._reset_download_behavior(f"download {params['state']}"))
             if method == "Page.javascriptDialogOpening":
                 self.dialog = params
             elif method == "Page.javascriptDialogClosed":
@@ -182,10 +174,6 @@ class Daemon:
                 except Exception: pass
             return await orig(method, params, session_id)
         self.cdp._event_registry.handle_event = tap
-        # Папка загрузок владельца могла остаться переставленной после прошлого демона или
-        # чужого прямого подключения к CDP: лечим на старте и дальше сторожим раз в DL_GUARD_SEC.
-        await self._reset_download_behavior("daemon start")
-        asyncio.ensure_future(self._download_guard())
 
     async def _enable(self, sid):
         for d in ("Page", "DOM", "Runtime", "Network"):
@@ -215,37 +203,6 @@ class Daemon:
                 except Exception: pass
             log(f"agent {agent[:12]}: idle, tab closed")
 
-    async def _reset_download_behavior(self, reason):
-        """Вернуть Chrome его папку загрузок (default = «Загрузки» владельца + окно сохранения).
-        Перестановка через CDP глобальна, живёт до конца процесса Chrome и из UI не видна —
-        25.07 и 01–02.10.2026 загрузки владельца сутками падали в каталоги агентов."""
-        if self.dl_reset: self.dl_reset.cancel(); self.dl_reset = None
-        try:
-            await asyncio.wait_for(self.cdp.send_raw("Browser.setDownloadBehavior",
-                                                     {"behavior": "default", "eventsEnabled": True}), timeout=10)
-            if self.dl_override or reason == "daemon start": log(f"download behavior restored to default ({reason})")
-            self.dl_override = False
-        except Exception as e:
-            log(f"download reset failed ({reason}): {e}")
-
-    def _arm_download_reset(self):
-        """Агент переставил папку загрузок. Возврат в default: сразу по завершении его загрузки
-        (tap, Browser.downloadProgress), иначе по таймеру DL_RESET_SEC с последней перестановки."""
-        if self.dl_reset: self.dl_reset.cancel()
-        self.dl_override = True
-        async def reset():
-            await asyncio.sleep(DL_RESET_SEC)
-            await self._reset_download_behavior(f"timer {DL_RESET_SEC}s")
-        self.dl_reset = asyncio.ensure_future(reset())
-        log(f"download behavior overridden by agent; auto-reset on completion or in {DL_RESET_SEC}s")
-
-    async def _download_guard(self):
-        """Сторож: пока ни один агент через демон не держит перестановку, раз в DL_GUARD_SEC
-        подтверждаем default — лечит перестановки мимо демона (прямой CDP, упавший скрипт)."""
-        while not self.stop.is_set():
-            await asyncio.sleep(DL_GUARD_SEC)
-            if not self.dl_override: await self._reset_download_behavior("guard")
-
     async def handle(self, req):
         meta = req.get("meta")
         agent = req.get("agent")
@@ -253,7 +210,6 @@ class Daemon:
             out = list(self.events); self.events.clear()
             return {"events": out}
         if meta == "pending_dialog": return {"dialog": self.dialog}
-        if meta == "downloads":       return {"downloads": list(self.downloads.values())}
         if meta == "shutdown":    self.stop.set(); return {"ok": True}
         await self._gc_agents()
         a = self.agents.get(agent) if agent else None
@@ -276,14 +232,9 @@ class Daemon:
 
         method = req["method"]
         params = req.get("params") or {}
-        if method in DL_METHODS:
-            if params.get("behavior") in ("allow", "allowAndName", "deny"):
-                params = {**params, "eventsEnabled": True}  # иначе демон не увидит завершения загрузки
-                self._arm_download_reset()
-            elif params.get("behavior") == "default":
-                if self.dl_reset: self.dl_reset.cancel(); self.dl_reset = None
-                if self.dl_override: log("download behavior restored to default (agent)")
-                self.dl_override = False
+        if OWNER_CHROME and method in DL_METHODS:
+            log(f"blocked {method} from agent {str(agent)[:12]}")
+            return {"error": DL_BLOCKED}
         # Browser-level Target.* calls must not use a session (stale or otherwise).
         # For everything else, explicit session in req wins; else default.
         browser_level = method.startswith(("Target.", "Browser."))

@@ -277,34 +277,70 @@ def upload_file(selector, path):
     if not nid: raise RuntimeError(f"no element for {selector}")
     cdp("DOM.setFileInputFiles", files=[path] if isinstance(path, str) else list(path), nodeId=nid)
 
+_DL_HOOK = r"""(()=>{if(window.__bhDl)return 'ok';const st=window.__bhDl={items:[]};
+const grab=(href,name)=>{const rec={href,name,state:'pending'};st.items.push(rec);
+ fetch(href,{credentials:'include'}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);
+  if(!rec.name){const cd=r.headers.get('content-disposition')||'';const m=cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
+   rec.name=m?decodeURIComponent(m[1]):decodeURIComponent(new URL(r.url).pathname.split('/').pop()||'download');}
+  const b=await r.blob();const fr=new FileReader();fr.onload=()=>{rec.data=String(fr.result).split(',')[1]||'';rec.state='done'};
+  fr.onerror=()=>{rec.state='error';rec.err='read'};fr.readAsDataURL(b);}).catch(e=>{rec.state='error';rec.err=String(e)});};
+const isFile=a=>a.hasAttribute('download')||/^(blob|data):/.test(a.href);
+const orig=HTMLAnchorElement.prototype.click;
+HTMLAnchorElement.prototype.click=function(){if(isFile(this)){grab(this.href,this.getAttribute('download')||'');return}return orig.call(this)};
+document.addEventListener('click',e=>{const a=e.composedPath().find(n=>n.tagName==='A');
+ if(a&&isFile(a)){e.preventDefault();e.stopImmediatePropagation();grab(a.href,a.getAttribute('download')||'')}},true);
+return 'installed'})()"""
+
+
+def _dl_dir(dest_dir):
+    import tempfile
+    d = dest_dir or os.path.join(tempfile.gettempdir(), "bh-downloads", (AGENT or "manual")[:12])
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _dl_save(dest_dir, name, b64):
+    name = os.path.basename(name or "download") or "download"
+    root, ext = os.path.splitext(name); path = os.path.join(dest_dir, name); i = 1
+    while os.path.exists(path): path = os.path.join(dest_dir, f"{root} ({i}){ext}"); i += 1
+    with open(path, "wb") as f: f.write(base64.b64decode(b64))
+    return path
+
+
 def download(trigger, dest_dir=None, timeout=120.0):
-    """Скачать файл через этот Chrome, не ломая загрузки владельца.
-    trigger — функция, запускающая скачивание (click/js/goto). Возвращает путь к файлу в dest_dir.
-    Папка загрузок Chrome глобальная и из UI не видна: перестановка живёт до конца процесса Chrome,
-    и файлы ВЛАДЕЛЬЦА молча уходят в папку агента. Поэтому перестановка только здесь, на время одной
-    загрузки, и возврат в default в finally (демон дублирует: по завершении, по таймеру, сторожем).
-    Сырой cdp('Browser.setDownloadBehavior', behavior='allow', downloadPath=...) в скриптах запрещён."""
-    import shutil, tempfile
-    dest_dir = dest_dir or os.path.join(tempfile.gettempdir(), "bh-downloads", (AGENT or "manual")[:12])
-    os.makedirs(dest_dir, exist_ok=True)
-    known = {d["guid"] for d in _send({"meta": "downloads"})["downloads"]}
-    cdp("Browser.setDownloadBehavior", behavior="allowAndName", downloadPath=dest_dir, eventsEnabled=True)
-    try:
-        trigger()
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            for d in _send({"meta": "downloads"})["downloads"]:
-                if d["guid"] in known: continue
-                if d.get("state") == "canceled": raise RuntimeError(f"download canceled: {d.get('url')}")
-                if d.get("state") == "completed":
-                    src = d.get("filePath") or os.path.join(dest_dir, d["guid"])
-                    dst = os.path.join(dest_dir, d.get("suggestedFilename") or d["guid"])
-                    if src != dst and os.path.exists(src): shutil.move(src, dst)
-                    return dst
-            time.sleep(0.5)
-        raise TimeoutError(f"download did not finish in {timeout:.0f}s (dest {dest_dir})")
-    finally:
-        cdp("Browser.setDownloadBehavior", behavior="default", eventsEnabled=True)
+    """Скачать файл, который страница отдаёт ссылкой (<a download>, blob:, data:), в dest_dir.
+    trigger — функция-клик (click/js). Хук на странице перехватывает ссылку и берёт байты fetch'ем с куками
+    страницы; менеджер загрузок Chrome не участвует. Возвращает путь к файлу.
+    Browser/Page.setDownloadBehavior на Chrome владельца демон отклоняет: любой такой вызов до перезапуска
+    Chrome ломает «Открыть»/«Показать в папке» у ВСЕХ загрузок владельца (подмена делегата DevTools).
+    Файл по прямому URL — fetch_file(url). Серверная выдача через POST-форму сюда не попадёт: бери агентский Chrome."""
+    dest_dir = _dl_dir(dest_dir)
+    js(_DL_HOOK)
+    seen = js("window.__bhDl.items.length") or 0
+    trigger()
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        st = js(f"(()=>{{const r=window.__bhDl&&window.__bhDl.items[{seen}];return r?JSON.stringify({{s:r.state,n:r.name,e:r.err||''}}):''}})()")
+        if st:
+            r = json.loads(st)
+            if r["s"] == "error": raise RuntimeError(f"download failed: {r['e']}")
+            if r["s"] == "done":
+                b64 = js(f"(()=>{{const r=window.__bhDl.items[{seen}];const d=r.data;r.data='';return d}})()")
+                return _dl_save(dest_dir, r["n"], b64)
+        time.sleep(0.5)
+    raise TimeoutError(f"no file link was clicked within {timeout:.0f}s — check the trigger or use fetch_file(url)")
+
+
+def fetch_file(url, dest_dir=None, name=None):
+    """Скачать URL fetch'ем изнутри текущей страницы (куки и сессия сайта) в dest_dir. Возвращает путь."""
+    dest_dir = _dl_dir(dest_dir)
+    r = js("fetch(%s,{credentials:'include'}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);"
+           "const cd=r.headers.get('content-disposition')||'';const m=cd.match(/filename\\*?=(?:UTF-8'')?\"?([^\";]+)/i);"
+           "const b=await r.blob();return await new Promise(res=>{const f=new FileReader();"
+           "f.onload=()=>res(JSON.stringify({n:m?decodeURIComponent(m[1]):'',d:String(f.result).split(',')[1]||''}));f.readAsDataURL(b)})})" % json.dumps(url))
+    if not r: raise RuntimeError(f"fetch_file failed for {url}")
+    r = json.loads(r)
+    return _dl_save(dest_dir, name or r["n"] or url.split("?")[0].rstrip("/").split("/")[-1], r["d"])
 
 
 def http_get(url, headers=None, timeout=20.0):

@@ -90,14 +90,14 @@ Profiles (cookies-only login state) live in `interaction-skills/profile-sync.md`
 
 `browser-harness` and `tanya-harness` hold `flock /tmp/bu-<BU_NAME>.lock` for the whole script: one script per profile at a time, others wait up to `BU_LOCK_WAIT` (900 s), then exit 75 ("did not get the browser", not "browser broken"). Keep scripts short. Your own agent tab survives between scripts, so the next script continues on the same page (`open_url`). Close the tab once, at the end of the task (`finish_task()`), and close any extra helper tab you opened yourself. Never spin a second driver on the same profile.
 
-### Downloads (закон владельца 25.07, повтор 02.10.2026)
+### Downloads (закон владельца 25.07 и 02.10.2026)
 
-Папка загрузок Chrome, переставленная через CDP (`Browser.setDownloadBehavior allow/allowAndName` + `downloadPath`), глобальна, живёт до перезапуска Chrome и из UI не видна. Дважды загрузки владельца сутками молча падали в каталоги агентов (`/tmp/.../scratchpad`, `~/.config/mega-vpn`), а Chrome при `allow` ещё и не показывает их в панели — владелец видит «файл не скачался». Поэтому:
+На Chrome владельца `Browser.setDownloadBehavior` / `Page.setDownloadBehavior` запрещены полностью, демон их отклоняет. Причина в Chromium: первый же такой вызов (любой behavior, даже `default`) до перезапуска Chrome подменяет менеджер загрузок профиля на `DevToolsDownloadManagerDelegate`, а тот не умеет `OpenDownload`/`ShowDownloadInShell` — у владельца «Открыть» и «Показать в папке» молча перестают работать для всех файлов. С `allow` к тому же все его загрузки уходят в папку агента. Обе беды были 25.07 и 01–02.10.2026, лечится только перезапуском Chrome.
 
-- Скачивание только через `download(trigger, dest_dir=None, timeout=120)` из `helpers.py`: `path = download(lambda: click(x, y))`. Помощник переставляет папку на одну загрузку и возвращает `default` в `finally`.
-- Сырой `cdp("Browser.setDownloadBehavior", behavior="allow", ...)` в скриптах запрещён. Если файл отдаёт обычный URL с куками — `js("fetch(url).then(r=>r.blob())…")` + base64, без перестановки вовсе.
-- Демон страхует четырьмя слоями: на старте ставит `default`; возвращает `default`, как только агентская загрузка завершилась (`Browser.downloadProgress`); потолок `BU_DL_RESET_SEC` (120 с) с последней перестановки; сторож `BU_DL_GUARD_SEC` (60 с) подтверждает `default`, пока никто через демон перестановку не держит — лечит и прямые подключения к CDP мимо демона.
-- Диагностика: `downloads.target_path` в копии `~/.config/google-chrome/Default/History` (sqlite) — сразу видно чужой путь. Лог демона: `grep "download behavior" /tmp/bu-default.log`.
+- Файл по клику на странице (`<a download>`, blob:, data:) → `path = download(lambda: click(x, y))`: хук перехватывает ссылку и берёт байты `fetch`'ем с куками страницы, менеджер загрузок Chrome не участвует.
+- Файл по прямому URL → `fetch_file(url, dest_dir=None, name=None)`.
+- Сервер отдаёт файл только на POST-форму или навигацию → агентский Chrome (:9333), там перестановка папки допустима.
+- Диагностика: `grep blocked /tmp/bu-default.log`; если «Открыть» в Chrome владельца мёртвое — кто-то вызвал setDownloadBehavior мимо демона, нужен перезапуск Chrome (с согласия владельца).
 
 ## Search first
 

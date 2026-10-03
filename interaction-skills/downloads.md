@@ -2,33 +2,28 @@
 
 Separate browser-triggered downloads from direct `http_get(...)` fetches, and document the minimal signals that prove a download actually started.
 
-## The trap (25.07.2026, again 01–02.10.2026)
+## Never call setDownloadBehavior on the owner's Chrome
 
-`Browser.setDownloadBehavior` with `behavior: allow|allowAndName` + `downloadPath` changes the download folder of the **whole running Chrome**, for the owner too, until Chrome restarts. Nothing in the UI shows it, and with `allow` Chrome also hides the download from the bubble. The owner saves a PDF, sees nothing, and the file sits in `~/.config/mega-vpn/` or an agent scratchpad. Twice this lasted a full day.
+`Browser.setDownloadBehavior` / `Page.setDownloadBehavior` with **any** behavior (including `default`) makes Chromium install `DevToolsDownloadManagerDelegate` over the profile's download manager for the rest of the Chrome process (`content/browser/devtools/protocol/devtools_download_manager_delegate.{h,cc}`: the constructor calls `download_manager_->SetDelegate(this)`; it overrides only DetermineDownloadTarget, ShouldOpenDownload, GetNextId, GetDownloadByGuid, SupportsHistoryLoading, Shutdown). `OpenDownload` and `ShowDownloadInShell` fall back to the empty base implementations, so "Open" and "Show in folder" in the owner's Chrome silently do nothing until Chrome restarts. With `allow` + `downloadPath` the owner's files also land in the agent's folder (no Save dialog, not shown in the bubble).
 
-## Rule
+Reproduced 02.10.2026 on a fresh Chrome 153 profile: show-in-folder → portal `OpenDirectory` → file manager opens; after one `setDownloadBehavior(default)` the same click produces no D-Bus call and no `xdg-open`.
 
-1. Browser-triggered download → `download(trigger, dest_dir=None, timeout=120)` from `helpers.py`:
+`daemon.py` rejects both methods when it drives the local owner profile (`BU_NAME=default`, no `BU_CDP_WS`, no remote).
 
-   ```python
-   path = download(lambda: click(640, 420))            # or lambda: js("document.querySelector('a.export').click()")
-   print(path)                                          # dest_dir/<suggestedFilename>
-   ```
+## How to download instead
 
-   It sets `allowAndName` into `dest_dir` for this one download, waits for `Browser.downloadProgress state=completed` (the daemon tracks it, `meta: downloads`), renames the guid file to the suggested name and **always** restores `default` in `finally`.
+```python
+path = download(lambda: click(640, 420))        # <a download>, blob:, data: links; returns dest_dir/<name>
+path = fetch_file("https://site/report.pdf")    # direct URL, page cookies included
+```
 
-2. Plain URL with cookies → no folder change at all: `js("fetch(URL).then(r=>r.blob()).then(b=>new Promise(r=>{const f=new FileReader();f.onload=()=>r(f.result);f.readAsDataURL(b)}))")` → base64 → write locally.
+`download()` installs a page hook (anchor `.click()` patch + capturing click listener) that cancels the native download and fetches the bytes with the page's credentials; works for blobs revoked right after the click. Default dest: `$TMPDIR/bh-downloads/<agent>/`.
 
-3. Raw `cdp("Browser.setDownloadBehavior", behavior="allow", ...)` in scripts is forbidden. The daemon still catches it: it arms the completion/timer reset and forces `eventsEnabled`.
-
-## Daemon safety net (`daemon.py`)
-
-- On start: `Browser.setDownloadBehavior default` (heals a stale override left by a crashed script or a previous daemon).
-- On agent override: reset as soon as the agent's download reaches `completed`/`canceled`; hard ceiling `BU_DL_RESET_SEC` (120 s) after the last override.
-- Guard every `BU_DL_GUARD_SEC` (60 s) while no agent holds an override through the daemon — heals direct CDP connections that bypass the daemon.
+Not covered: files the server returns only to a form POST or a top-level navigation. Use the agent Chrome (:9333) for those; changing its download behavior is fine.
 
 ## Diagnose
 
-- `~/.config/google-chrome/Default/History` (copy it, sqlite): `select datetime(start_time/1000000-11644473600,'unixepoch','localtime'), target_path from downloads order by start_time desc` — a foreign `target_path` is the hijack.
-- `grep "download behavior" /tmp/bu-default.log` — who overrode and when it was restored.
-- Owner profile has `prompt_for_download: true`: a correct `default` state shows the Save dialog on the owner's screen; a silent save means an override is active.
+- `grep blocked /tmp/bu-default.log` — agents that tried the forbidden call.
+- Owner says "Open / Show in folder does nothing": watch `dbus-monitor --session` for `OpenDirectory` and `inotifywait`-style opens of `/usr/bin/xdg-open` while clicking; silence from Chrome means the DevTools delegate is installed → restart Chrome (ask the owner first).
+- `~/.config/google-chrome/Default/History` (copy, sqlite) `downloads.target_path` — a foreign path means an `allow` override.
+- `download.open_pdf_in_system_reader: true` in Preferences ("Always open PDFs" from the bubble menu) skips the Save dialog and hands PDFs to xdg-open; reset via `chrome://settings/downloads` → `chrome.send('resetAutoOpenFileTypes')`.
