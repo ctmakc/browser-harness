@@ -165,6 +165,13 @@ class Daemon:
         mark_js = "if(!document.title.startsWith('\U0001F7E2'))document.title='\U0001F7E2 '+document.title"
         async def tap(method, params, session_id=None):
             self.events.append({"method": method, "params": params, "session_id": session_id})
+            if method in ("Target.detachedFromTarget", "Target.targetDestroyed", "Target.targetCrashed"):
+                # Вкладку агента закрыли (владелец или сам агент через Target.closeTarget): забыть её,
+                # следующий вызов агента получит свежую. Иначе «No target with given id found» навсегда.
+                gone_t, gone_s = params.get("targetId"), params.get("sessionId")
+                for ag, a in list(self.agents.items()):
+                    if (gone_t and gone_t in (a.get("tid"), a.get("own"))) or (gone_s and gone_s == a.get("sid")):
+                        self.agents.pop(ag, None); log(f"agent {ag[:12]}: tab gone ({method}), forgotten")
             if method == "Page.javascriptDialogOpening":
                 self.dialog = params
             elif method == "Page.javascriptDialogClosed":
