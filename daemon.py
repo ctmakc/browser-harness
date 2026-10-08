@@ -168,12 +168,31 @@ class Daemon:
         _cc.websockets.connect = functools.partial(
             _orig_connect, ping_interval=None,
             **({"open_timeout": float(os.environ.get("BU_ALLOW_WAIT", "21600"))} if OWNER_CHROME else {}))
+        nag = None
         if OWNER_CHROME:
             log("waiting for owner to click «Разрешить» in Chrome (if the prompt is shown)")
+            # 3) Рукопожатие висит дольше 6 с → окно «Разрешить» ждёт владельца: кнопка ему в Telegram
+            #    (chrome-allow notify, сам не чаще раза в 10 мин; нажатие жмёт окно через бот ОСМОЗГ).
+            async def _nag():
+                await asyncio.sleep(6)
+                while True:
+                    log("handshake still pending -> chrome-allow notify")
+                    try:
+                        await asyncio.create_subprocess_exec(
+                            os.path.expanduser("~/.local/bin/chrome-allow"), "notify",
+                            env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":0")},
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                    except Exception as e:
+                        log(f"chrome-allow notify: {e}")
+                    await asyncio.sleep(600)
+            nag = asyncio.create_task(_nag())
         try:
             await self.cdp.start()
         except Exception as e:
             raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
+        finally:
+            if nag:
+                nag.cancel()
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event
         mark_js = "if(!document.title.startsWith('\U0001F7E2'))document.title='\U0001F7E2 '+document.title"
