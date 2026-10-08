@@ -156,6 +156,20 @@ class Daemon:
         url = get_ws_url()
         log(f"connecting to {url}")
         self.cdp = CDPClient(url)
+        # Одно «Разрешить» владельца = соединение навсегда (08.10.2026).
+        # 1) Клиентский keepalive выключен: websockets по умолчанию рвёт WS, если Chrome не ответил на пинг
+        #    за 20 с (долгий скриншот, подвисшая вкладка), а каждое новое подключение снова зовёт окно Allow.
+        #    Сокет локальный: настоящий обрыв (Chrome закрыт) всё равно виден сразу.
+        # 2) Рукопожатие с Chrome владельца ждёт клика до BU_ALLOW_WAIT с (6 ч), а не 10 с: окно висит одно,
+        #    admin.ensure_daemon пока не плодит новых демонов (смотрит pid-файл).
+        import functools, cdp_use.client as _cc
+        _orig_connect = getattr(_cc.websockets, "_bh_orig_connect", _cc.websockets.connect)
+        _cc.websockets._bh_orig_connect = _orig_connect
+        _cc.websockets.connect = functools.partial(
+            _orig_connect, ping_interval=None,
+            **({"open_timeout": float(os.environ.get("BU_ALLOW_WAIT", "21600"))} if OWNER_CHROME else {}))
+        if OWNER_CHROME:
+            log("waiting for owner to click «Разрешить» in Chrome (if the prompt is shown)")
         try:
             await self.cdp.start()
         except Exception as e:
