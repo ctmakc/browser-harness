@@ -133,6 +133,10 @@ class Daemon:
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
         pages = [t for t in targets if is_real_page(t)]
         if not pages:
+            # Пустая вкладка уже есть — берём её: новая about:blank на каждый старт демона копилась
+            # (Chrome робота :9241, 17.10.2026: 25 пустых вкладок за двое суток).
+            pages = [t for t in targets if t["type"] == "page" and t.get("url") == "about:blank"][:1]
+        if not pages:
             # No real pages — create one instead of attaching to omnibox popup
             tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
             log(f"no real pages found, created about:blank ({tid})")
