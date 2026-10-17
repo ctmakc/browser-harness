@@ -194,6 +194,16 @@ class Daemon:
             if nag:
                 nag.cancel()
         await self.attach_first_page()
+        # Chrome перезапустили / WS оборвался → демон выходит, следующий вызов ensure_daemon поднимет
+        # свежий на актуальный адрес. Иначе демон живёт с мёртвым соединением и каждый вызов
+        # получает «no close frame received or sent» (lisw-robot, 15–17.10.2026: Chrome :9241
+        # перезапущен 15.10 18:51, демон с 14.10 отвечал этим двое суток).
+        async def _watch_ws(task):
+            try: await task
+            except BaseException: pass
+            log("CDP connection closed -> daemon exits")
+            self.stop.set()
+        self._ws_watch = asyncio.create_task(_watch_ws(self.cdp._message_handler_task))
         orig = self.cdp._event_registry.handle_event
         mark_js = "if(!document.title.startsWith('\U0001F7E2'))document.title='\U0001F7E2 '+document.title"
         async def tap(method, params, session_id=None):
