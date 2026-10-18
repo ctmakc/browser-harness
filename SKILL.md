@@ -5,6 +5,10 @@ description: Direct browser control via CDP. Use when the user wants to automate
 
 # browser-harness
 
+> **Chrome владельца закрыт для агентов (22.09.2026).** Анкеты, формы, регистрации, заявки, любые сайты без его личного логина → `tanya-harness <<'PY' ... PY` (те же helpers, Chrome Тани на claw). `browser-harness` из агентской сессии без `BH_OWNER_WHY="…"` отвечает кодом 64. Причину ставить только когда нужен именно залогиненный кабинет владельца; каждый такой запуск пишется в `~/.local/state/browser-harness/owner-chrome.log`.
+
+> **Своя вкладка на агента (22.09.2026).** Демон узнаёт агента по `BU_AGENT` / `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `TMUX_PANE` и держит ему свою текущую вкладку: чужой `switch_tab` её больше не уводит. В Chrome Тани (`BU_AGENT_WINDOW=1`) у каждого агента своё окно. В Chrome владельца агентская вкладка фоновая, `switch_tab` её на передний план не выдёргивает (`BU_ACTIVATE=0`). Закрыл вспомогательную вкладку → следующая команда вернётся в свою основную. Вкладки агентов, простоявших 30 мин, демон закрывает сам. `ensure_real_tab()` у агента остаётся в своей вкладке. Без id (кроны) — старая общая вкладка. Очередь flock остаётся: один скрипт за раз на браузер.
+
 Easiest and most powerful way to interact with the browser. **Read this file in full before using or editing the harness** — it has to be in context.
 
 ## Fast start
@@ -13,14 +17,27 @@ Read `helpers.py` first. For first-time install or reconnect/bootstrap, read `in
 
 ```bash
 browser-harness <<'PY'
-new_tab("https://docs.browser-use.com")
-wait_for_load()
+open_url("https://docs.browser-use.com")   # грузит, только если своя вкладка ещё не на этой странице
 print(page_info())
 PY
 ```
 
 - Invoke as `browser-harness` — it's on `$PATH`. No `cd`, no `uv run`.
-- First navigation is `new_tab(url)`, not `goto(url)` — `goto` runs in the user's active tab and clobbers their work.
+- **Агент (сессия Claude/Codex/tmux) — `open_url(url)`.** Демон держит агенту ОДНУ фоновую вкладку между скриптами. Следующий скрипт продолжает на той же странице: без `new_tab`, без `close_tab`, без повторной загрузки.
+- Без id агента (кроны) `open_url` сам откроет `new_tab`, чтобы не затереть активную вкладку пользователя.
+
+## Работать как человек (закон владельца 01.10.2026)
+
+Владелец: «вместо того чтобы на одной странице клацать несколько полей, ты постоянно её перезагружаешь… люди так не релодят страницу постоянно». Частые перезагрузки и новые вкладки — лишнее время и сигнал бота (LinkedIn уже блокировал аккаунт).
+
+- **Одна вкладка на задачу.** Закрывать её `finish_task()` в конце ЗАДАЧИ. Конец скрипта вкладку не закрывает.
+- **Перед навигацией посмотри, где ты:** `open_url` сам проверит URL. Перезагрузка — только `open_url(url, reload=True)` и только с причиной (страница сломалась, нужен свежий кэш).
+- **Несколько полей одной формы — в одном скрипте**, на той же странице: заполнил → `human_pause()` → следующее → сохранил.
+- **Проверять результат без перезагрузки:** `screenshot()` или `js(...)` на текущей странице. Reload «для проверки» запрещён; исключение — страница, которая сама отдаёт кэш (LinkedIn About без `?param`), один раз.
+- **Внутри SPA (LinkedIn, Facebook, Gmail) переходить кликом по ссылке или кнопке**, как человек. `goto` нужен, только когда ссылки на экране нет.
+- **Ритм:** `human_pause()` между кликами (0,8–2,5 с), длиннее между отправками. Пачки короткие.
+- Капча, проверка личности, «unusual activity» → стоп, скриншот, доклад. Не повторять.
+- **Субагенты одной сессии делят CLAUDE_CODE_SESSION_ID, а значит и вкладку.** Каждому фоновому агенту — свой `BU_AGENT=<имя>` перед `browser-harness`, иначе они перебивают друг другу страницу.
 
 The code is the doc.
 
@@ -62,6 +79,25 @@ PY
 `start_remote_daemon` prints `liveUrl` and auto-opens it in the local browser (if a GUI is detected) so the user can watch along. Headless servers print only — share the URL with the user. The daemon `PATCH`es the cloud browser to `stop` on shutdown, which persists profile state. Running remote daemons bill until timeout.
 
 Profiles (cookies-only login state) live in `interaction-skills/profile-sync.md` — covers `list_cloud_profiles()`, the chat-driven "which profile?" pattern, and `sync_local_profile()` for uploading a local Chrome profile.
+
+### Which browser (rule of 09.09.2026)
+
+- **Public web** (Google, participant sites, anything that needs no login of the owner): do NOT use this harness — it drives the owner's personal Chrome and steals the cursor. Use `mcp__playwright__*` (invisible agent Chrome :9333) or WebFetch/WebSearch.
+- **Facebook / Instagram / persona Tanya's sessions**: `tanya-harness <<'PY' ... PY` — same helpers, the script is sent over SSH to claw (10.0.0.141), where her Chrome (:9335, logged in) lives. Never open FB/IG in the owner's Chrome for research.
+- **Owner's logged-in sessions** (Cloudflare, Google Console, adm.tools, …) on the owner's explicit request only: plain `browser-harness`.
+
+### Queue
+
+`browser-harness` and `tanya-harness` hold `flock /tmp/bu-<BU_NAME>.lock` for the whole script: one script per profile at a time, others wait up to `BU_LOCK_WAIT` (900 s), then exit 75 ("did not get the browser", not "browser broken"). Keep scripts short. Your own agent tab survives between scripts, so the next script continues on the same page (`open_url`). Close the tab once, at the end of the task (`finish_task()`), and close any extra helper tab you opened yourself. Never spin a second driver on the same profile.
+
+### Downloads (закон владельца 25.07 и 02.10.2026)
+
+На Chrome владельца `Browser.setDownloadBehavior` / `Page.setDownloadBehavior` запрещены полностью, демон их отклоняет. Причина в Chromium: первый же такой вызов (любой behavior, даже `default`) до перезапуска Chrome подменяет менеджер загрузок профиля на `DevToolsDownloadManagerDelegate`, а тот не умеет `OpenDownload`/`ShowDownloadInShell` — у владельца «Открыть» и «Показать в папке» молча перестают работать для всех файлов. С `allow` к тому же все его загрузки уходят в папку агента. Обе беды были 25.07 и 01–02.10.2026, лечится только перезапуском Chrome.
+
+- Файл по клику на странице (`<a download>`, blob:, data:) → `path = download(lambda: click(x, y))`: хук перехватывает ссылку и берёт байты `fetch`'ем с куками страницы, менеджер загрузок Chrome не участвует.
+- Файл по прямому URL → `fetch_file(url, dest_dir=None, name=None)`.
+- Сервер отдаёт файл только на POST-форму или навигацию → агентский Chrome (:9333), там перестановка папки допустима.
+- Диагностика: `grep blocked /tmp/bu-default.log`; если «Открыть» в Chrome владельца мёртвое — кто-то вызвал setDownloadBehavior мимо демона, нужен перезапуск Chrome (с согласия владельца).
 
 ## Search first
 
@@ -128,7 +164,7 @@ The *durable* shape of the site — the map, not the diary. Focus on what the ne
 - **Screenshots first**: use `screenshot()` to understand the current page quickly, find visible targets, and decide whether you need a click, a selector, or more navigation.
 - **Clicking**: `screenshot()` → look → `click(x, y)` → `screenshot()` again to verify the result. Coordinate clicks pass through iframes/shadow/cross-origin at the compositor level.
 - **Bulk HTTP**: `http_get(url)` + `ThreadPoolExecutor`. No browser for static pages (249 Netflix pages in 2.8s).
-- **After goto**: `wait_for_load()`.
+- **Navigation**: `open_url(url)` (reuses the current page, waits for load). Raw `goto` + `wait_for_load()` only when you really need a fresh navigation.
 - **Wrong/stale tab**: `ensure_real_tab()`. Use it when the current tab is stale or internal; the daemon also auto-recovers from stale sessions on the next call.
 - **Verification**: `print(page_info())` is the simplest "is this alive?" check, but screenshots are the default way to verify whether a visible action actually worked.
 - **DOM reads**: use `js(...)` for inspection and extraction when the screenshot shows that coordinates are the wrong tool.

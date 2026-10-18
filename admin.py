@@ -52,6 +52,15 @@ def ensure_daemon(wait=60.0, name=None, env=None):
     """Idempotent. `env` is merged into the child process env."""
     if daemon_alive(name):
         return
+    # Демон уже запущен и ждёт клика «Разрешить» в Chrome владельца — второй не плодить:
+    # каждое новое подключение открывает в Chrome ещё одно окно «Разрешить удалённую отладку?».
+    try:
+        pid = int(Path(_paths(name)[1]).read_text().strip())
+        if pid and "daemon.py" in Path(f"/proc/{pid}/cmdline").read_text(errors="replace"):
+            raise RuntimeError(f"Chrome ждёт нажатия «Разрешить» в окне «Разрешить удалённую отладку?» "
+                               f"(демон {name or NAME} pid {pid} ждёт подключения; новых попыток не делаем)")
+    except (FileNotFoundError, ValueError, ProcessLookupError):
+        pass
     import subprocess
 
     e = {**os.environ, **({"BU_NAME": name} if name else {}), **(env or {})}
