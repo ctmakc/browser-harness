@@ -1,5 +1,5 @@
 """CDP WS holder + Unix socket relay. One daemon per BU_NAME."""
-import asyncio, json, os, socket, sys, time, urllib.request
+import asyncio, json, os, signal, socket, sys, time, urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -34,6 +34,10 @@ AGENT_IDLE = int(os.environ.get("BU_AGENT_IDLE", "1800"))
 # Потолок на один CDP-вызов. Без него вкладка с зависшим рендерером (FB messenger на 5 ГБ,
 # 28.09) вешала клиента навсегда, а тот держал flock очереди tanya-harness.
 CALL_TIMEOUT = float(os.environ.get("BU_CALL_TIMEOUT", "60"))
+# Страж вкладок (не для Chrome владельца): страниц больше BU_TAB_LIMIT → закрыть пустые about:blank,
+# к которым никто не подключён (сироты умерших демонов). Chrome робота NetworkHub :9241, 24.10.2026:
+# 175 пустых вкладок, 188 рендереров, ~33 ГБ RAM. 0 — выключить.
+TAB_LIMIT = int(os.environ.get("BU_TAB_LIMIT", "10"))
 PROFILES = [
     Path.home() / "Library/Application Support/Google/Chrome",
     Path.home() / "Library/Application Support/Microsoft Edge",
@@ -198,6 +202,7 @@ class Daemon:
             if nag:
                 nag.cancel()
         await self.attach_first_page()
+        await self.tab_guard()
         # Chrome перезапустили / WS оборвался → демон выходит, следующий вызов ensure_daemon поднимет
         # свежий на актуальный адрес. Иначе демон живёт с мёртвым соединением и каждый вызов
         # получает «no close frame received or sent» (lisw-robot, 15–17.10.2026: Chrome :9241
@@ -229,6 +234,43 @@ class Daemon:
             return await orig(method, params, session_id)
         self.cdp._event_registry.handle_event = tap
 
+    async def tab_guard(self):
+        """Страниц больше TAB_LIMIT → закрыть пустые about:blank без подключённого клиента.
+        attached=false = вкладку держал умерший демон (systemd убил его вместе с oneshot-юнитом),
+        живые вкладки агентов и сессия этого демона подключены и не трогаются. Последнюю
+        страницу не закрываем никогда: без окон Chrome выходит."""
+        if OWNER_CHROME or TAB_LIMIT <= 0: return 0
+        try:
+            targets = (await asyncio.wait_for(self.cdp.send_raw("Target.getTargets"), timeout=10))["targetInfos"]
+        except Exception as e:
+            log(f"tab_guard: {e}"); return 0
+        pages = [t for t in targets if t["type"] == "page"]
+        if len(pages) <= TAB_LIMIT: return 0
+        mine = {a.get(k) for a in self.agents.values() for k in ("tid", "own")}
+        idle = [t for t in pages if t.get("url") in ("about:blank", "") and not t.get("attached")
+                and t["targetId"] not in mine]
+        idle = idle[:max(0, len(pages) - 1)]
+        closed = 0
+        for t in idle:
+            try:
+                await asyncio.wait_for(self.cdp.send_raw("Target.closeTarget", {"targetId": t["targetId"]}), timeout=5)
+                closed += 1
+            except Exception:
+                pass
+        log(f"tab_guard: {len(pages)} pages > {TAB_LIMIT}, closed {closed} orphan about:blank")
+        return closed
+
+    async def close_agent_tabs(self):
+        """Выход демона (SIGTERM от systemd, shutdown): закрыть свои вкладки агентов. Иначе их id
+        умирают вместе с демоном, новый демон заводит новую вкладку, а старая висит до перезапуска
+        Chrome (linkedin-services-watch каждые 20 мин → ~72 пустые вкладки в сутки)."""
+        for agent, a in list(self.agents.items()):
+            if a.get("own"):
+                try: await asyncio.wait_for(self.cdp.send_raw("Target.closeTarget", {"targetId": a["own"]}), timeout=3)
+                except Exception: pass
+                log(f"agent {agent[:12]}: daemon exit, tab closed")
+        self.agents.clear()
+
     async def _enable(self, sid):
         for d in ("Page", "DOM", "Runtime", "Network"):
             try: await asyncio.wait_for(self.cdp.send_raw(f"{d}.enable", session_id=sid), timeout=5)
@@ -238,6 +280,7 @@ class Daemon:
         """Своя вкладка агента: создаётся при первом обращении, дальше переиспользуется."""
         a = self.agents.get(agent)
         if a: return a
+        await self.tab_guard()
         params = {"url": "about:blank", "background": True}
         if AGENT_WINDOW: params["newWindow"] = True
         tid = (await asyncio.wait_for(self.cdp.send_raw("Target.createTarget", params), timeout=20))["targetId"]
@@ -361,7 +404,13 @@ async def serve(d):
 async def main():
     d = Daemon()
     await d.start()
-    await serve(d)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(sig, d.stop.set)
+    try:
+        await serve(d)
+    finally:
+        await d.close_agent_tabs()
 
 
 def already_running():
