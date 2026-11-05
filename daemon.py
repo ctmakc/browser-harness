@@ -1,5 +1,5 @@
 """CDP WS holder + Unix socket relay. One daemon per BU_NAME."""
-import asyncio, json, os, signal, socket, sys, time, urllib.request
+import asyncio, json, os, re, signal, socket, sys, time, urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -72,6 +72,26 @@ OWNER_CHROME = NAME == "default" and not os.environ.get("BU_CDP_WS") and not REM
 DL_BLOCKED = ("setDownloadBehavior запрещён на Chrome владельца: ломает «Открыть»/«Показать в папке» до перезапуска Chrome. "
               "Качай helpers.fetch_file(url) или download(trigger) — они берут байты через fetch страницы.")
 
+# Менеджер паролей Chrome закрыт для скриптов (ночной аудит безопасности 05.11.2026). Через CDP скрипт мог открыть
+# chrome://password-manager и вызвать chrome.passwordsPrivate.requestPlaintextPassword — это все сохранённые
+# пароли открытым текстом. API есть и на chrome://settings (проверено 05.11), поэтому отказ трёх видов:
+#   1) адрес менеджера паролей (chrome://…passw…) или строка passwordsPrivate в любых параметрах любого вызова;
+#   2) attach к вкладке, которая уже на менеджере паролей; любой вызов в сессии такой вкладки
+#      (адрес chrome://-вкладок перечитывается на каждом вызове — внутренняя навигация тоже ловится);
+#   3) выполнение кода (Runtime/Debugger/…) во вкладке chrome://settings*, кроме PW_SETTINGS_OK.
+# Target.sendMessageToTarget и Target.exposeDevToolsProtocol обходят сессии — запрещены целиком.
+# Секреты для автоматики — файлы ~/.config/local-secrets/*.env (600).
+PW_PARAM_RE = re.compile(r"chrome:/*[^\s\"']*passw|passwordsprivate", re.I)
+PW_PAGE_RE = re.compile(r"^chrome://(password-manager|settings/passwords)", re.I)
+PW_CODE_METHODS = ("Runtime.evaluate", "Runtime.callFunctionOn", "Runtime.compileScript", "Runtime.runScript",
+                   "Runtime.addBinding", "Debugger.", "Page.addScriptToEvaluateOnNewDocument", "Page.createIsolatedWorld",
+                   "DOM.", "DOMDebugger.", "Input.", "Overlay.")
+PW_SETTINGS_OK = {"chrome.send('resetAutoOpenFileTypes')"}   # interaction-skills/downloads.md
+PW_RAW_METHODS = ("Target.sendMessageToTarget", "Target.exposeDevToolsProtocol")
+PW_BLOCKED = ("менеджер паролей Chrome закрыт для скриптов (аудит 05.11.2026): chrome://password-manager, "
+              "chrome://settings/passwords, passwordsPrivate и выполнение кода на chrome://settings запрещены. "
+              "Пароль для автоматики — отдельный файл ~/.config/local-secrets/<имя>.env с правами 600.")
+
 
 def log(msg):
     open(LOG, "a").write(f"{msg}\n")
@@ -131,6 +151,7 @@ class Daemon:
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
+        self.sess = {}    # sessionId -> [targetId, url] — для запрета менеджера паролей
 
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
@@ -217,6 +238,11 @@ class Daemon:
         mark_js = "if(!document.title.startsWith('\U0001F7E2'))document.title='\U0001F7E2 '+document.title"
         async def tap(method, params, session_id=None):
             self.events.append({"method": method, "params": params, "session_id": session_id})
+            if method == "Target.attachedToTarget":
+                ti = params.get("targetInfo") or {}
+                self.sess[params.get("sessionId")] = [ti.get("targetId"), ti.get("url", "")]
+            elif method == "Target.detachedFromTarget":
+                self.sess.pop(params.get("sessionId"), None)
             if method in ("Target.detachedFromTarget", "Target.targetDestroyed", "Target.targetCrashed"):
                 # Вкладку агента закрыли (владелец или сам агент через Target.closeTarget): забыть её,
                 # следующий вызов агента получит свежую. Иначе «No target with given id found» навсегда.
@@ -270,6 +296,39 @@ class Daemon:
                 except Exception: pass
                 log(f"agent {agent[:12]}: daemon exit, tab closed")
         self.agents.clear()
+
+    async def _target_url(self, tid):
+        try:
+            r = await asyncio.wait_for(self.cdp.send_raw("Target.getTargetInfo", {"targetId": tid}), timeout=5)
+            return (r.get("targetInfo") or {}).get("url", "")
+        except Exception:
+            return ""
+
+    async def _pw_guard(self, method, params, sid):
+        """Причина отказа (строка) или None. См. PW_BLOCKED."""
+        if method in PW_RAW_METHODS:
+            return "raw"
+        try: blob = json.dumps(params, ensure_ascii=False)
+        except Exception: blob = str(params)
+        if PW_PARAM_RE.search(blob):
+            return "param"
+        if method == "Target.attachToTarget" and PW_PAGE_RE.search(await self._target_url(params.get("targetId"))):
+            return "attach"
+        if method.startswith(("Target.", "Browser.")) or not sid:
+            return None
+        s = self.sess.get(sid)
+        if not s or not s[0]:
+            return None
+        # Адрес перечитывается перед каждым выполнением кода и на любой chrome://-вкладке: вкладка могла
+        # уйти на chrome:// через history.back()/внутреннюю навигацию, кэш об этом не знает.
+        if method.startswith(PW_CODE_METHODS) or s[1].startswith("chrome") or not s[1]:
+            s[1] = await self._target_url(s[0]) or s[1]
+        if PW_PAGE_RE.search(s[1]):
+            return "page"
+        if s[1].lower().startswith("chrome://settings") and method.startswith(PW_CODE_METHODS) \
+                and (params.get("expression") or "").strip() not in PW_SETTINGS_OK:
+            return "settings-code"
+        return None
 
     async def _enable(self, sid):
         for d in ("Page", "DOM", "Runtime", "Network"):
@@ -332,6 +391,10 @@ class Daemon:
         if OWNER_CHROME and method in DL_METHODS:
             log(f"blocked {method} from agent {str(agent)[:12]}")
             return {"error": DL_BLOCKED}
+        pw = await self._pw_guard(method, params, req.get("session_id") or (a["sid"] if a else self.session))
+        if pw:
+            log(f"blocked password-manager ({pw}) {method} from agent {str(agent)[:12]}")
+            return {"error": PW_BLOCKED}
         # Browser-level Target.* calls must not use a session (stale or otherwise).
         # For everything else, explicit session in req wins; else default.
         browser_level = method.startswith(("Target.", "Browser."))
@@ -340,7 +403,10 @@ class Daemon:
         default = a["sid"] if a else self.session
         sid = None if browser_level else (req.get("session_id") or default)
         try:
-            return {"result": await asyncio.wait_for(self.cdp.send_raw(method, params, session_id=sid), timeout=CALL_TIMEOUT)}
+            res = await asyncio.wait_for(self.cdp.send_raw(method, params, session_id=sid), timeout=CALL_TIMEOUT)
+            if method == "Target.attachToTarget" and isinstance(res, dict) and res.get("sessionId"):
+                self.sess.setdefault(res["sessionId"], [params.get("targetId"), ""])
+            return {"result": res}
         except asyncio.TimeoutError:
             log(f"timeout {CALL_TIMEOUT:.0f}s: {method} session={sid}")
             if a and sid == a.get("sid"):
