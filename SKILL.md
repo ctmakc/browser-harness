@@ -196,6 +196,7 @@ Chrome / Browser Use cloud -> CDP WS -> daemon.py -> /tmp/bu-<NAME>.sock -> run.
 
 ## Gotchas (field-tested)
 
+- **Functions you define in the script cannot see each other (07.11.2026, `NameError: name 'val' is not defined`).** `run.py` does `exec(sys.stdin.read())` inside `main()`, so top-level `def`/`import` in your script land in a locals dict while a function body resolves names through the module globals. Helpers (`js`, `open_url`, …) are fine; your own helpers and `import json` are not. Put the whole script inside one `def _run(): …` and call `_run()` at the end — closures see everything.
 - **Chrome 144+ `chrome://inspect/#remote-debugging` does NOT serve `/json/version`.** Read `DevToolsActivePort` instead.
 - **Try attaching before asking for setup.** If `uv run browser-harness` already works, skip the remote-debugging instructions entirely. Decide what to escalate from the harness's error message, not from whether Chrome is visibly running.
 - **The remote-debugging checkbox is per-profile sticky in Chrome.** Once ticked on a profile, every future Chrome launch auto-enables CDP — only navigate to `chrome://inspect/#remote-debugging` when `DevToolsActivePort` is genuinely missing on a fresh profile.
