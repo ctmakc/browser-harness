@@ -206,6 +206,7 @@ Chrome / Browser Use cloud -> CDP WS -> daemon.py -> /tmp/bu-<NAME>.sock -> run.
 - **Omnibox popups are fake `page` targets.** Filter `chrome://omnibox-popup...` and other internals when you need a real tab.
 - **CDP target order != Chrome's visible tab-strip order.** Use UI automation when the user means "the first/second tab I can see"; `Target.activateTarget` only shows a known target.
 - **Default daemon sessions can go stale.** `ensure_real_tab()` re-attaches to a real page.
+- **A foreign tab you attach to by `target_id` can have a dead renderer** (06.11.2026: WhatsApp Web, Ads Manager in a background window — no dialog, `Target.*` answers, every `Runtime.*` waits the full 60 s). The daemon only self-heals its own agent tab. For foreign tabs use `live_tab("web.whatsapp.com", url=...)` (or `tab_alive(tid)` + `heal_tab(tid, ...)`): 10 s probe, then close and reopen the same URL in the same browser context — cookies/session survive, no relogin. Give the fresh page time to load before reading it.
 - **`no close frame received or sent` usually means a stale daemon / websocket.** Restart the daemon once with:
   `uv run python - <<'PY'`
   `from admin import restart_daemon`

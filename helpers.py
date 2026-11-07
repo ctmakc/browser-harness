@@ -256,6 +256,47 @@ def js(expression, target_id=None):
     return r.get("result", {}).get("value")
 
 
+# --- hung tabs (06.11.2026) ---
+# Рендерер фоновой вкладки Chrome владельца иногда умирает: диалога нет, Target.* отвечает, а любой
+# Runtime.* молчит все 60 с демона. Свою агентскую вкладку демон закрывает сам; чужую вкладку, к которой
+# скрипт цепляется по target_id (WhatsApp Web, Ads Manager в контексте mstinnova), — нет. Сторожа на
+# таймерах падали каждый проход. Лечение одно для всех: закрыть вкладку, открыть новую с тем же URL
+# в том же browser context — cookie/сессия сайта живут в контексте, перелогин не нужен.
+def tab_alive(target_id=None, timeout=10.0):
+    """True, если рендерер вкладки ответил на Runtime.evaluate за timeout с (по умолчанию 10, не 60 демона)."""
+    import threading
+    res = {}
+    def probe():
+        try:
+            sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"] if target_id else None
+            res["r"] = cdp("Runtime.evaluate", session_id=sid, expression="1", returnByValue=True)
+        except Exception as e:
+            res["e"] = e
+    th = threading.Thread(target=probe, daemon=True); th.start(); th.join(timeout)
+    return "r" in res
+
+def heal_tab(target_id, url=None, background=True, **create):
+    """Закрыть зависшую вкладку и открыть новую (тот же URL, тот же browser context). Возвращает новый targetId.
+    url — чем заменить (по умолчанию URL старой); create — доп. параметры Target.createTarget
+    (newWindow, left, top, width, height)."""
+    info = cdp("Target.getTargetInfo", targetId=target_id).get("targetInfo", {})
+    ctx = info.get("browserContextId")
+    params = {"url": url or info.get("url") or "about:blank", "background": background, **create}
+    if ctx and ctx in cdp("Target.getBrowserContexts").get("browserContextIds", []):
+        params["browserContextId"] = ctx  # контекст по умолчанию в этом списке не значится — его id не передаём
+    try: cdp("Target.closeTarget", targetId=target_id)
+    except Exception: pass
+    return cdp("Target.createTarget", **params)["targetId"]
+
+def live_tab(match, timeout=10.0, url=None, **create):
+    """targetId чужой вкладки, чей URL содержит match, с живым рендерером: зависшую закрывает и открывает
+    заново (heal_tab, свежей странице нужно время загрузиться). None — такой вкладки нет."""
+    for t in list_tabs():
+        if match in t.get("url", ""):
+            return t["targetId"] if tab_alive(t["targetId"], timeout) else heal_tab(t["targetId"], url=url, **create)
+    return None
+
+
 _KC = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, " ": 32, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40}
 
 
