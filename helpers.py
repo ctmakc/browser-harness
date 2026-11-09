@@ -227,7 +227,13 @@ def human_pause(lo=0.8, hi=2.5):
 def finish_task():
     """Конец ЗАДАЧИ (не скрипта): увести свою вкладку на about:blank (страница выгружается).
     Саму вкладку не закрываем: демон помнит её id, а простоявшую 30 мин закроет сам."""
-    if AGENT: goto("about:blank")
+    if not AGENT: return
+    try:
+        if (js("document.title") or "").lstrip().startswith("\U0001F449"):
+            return  # вкладка-передача владельцу («👉 …»): форма ждёт его капчу/клик, не выгружать
+    except Exception:
+        pass
+    goto("about:blank")
 
 def iframe_target(url_substr):
     """First iframe target whose URL contains `url_substr`. Use with js(..., target_id=...)."""

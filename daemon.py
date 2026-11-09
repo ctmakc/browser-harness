@@ -291,6 +291,8 @@ class Daemon:
         умирают вместе с демоном, новый демон заводит новую вкладку, а старая висит до перезапуска
         Chrome (linkedin-services-watch каждые 20 мин → ~72 пустые вкладки в сутки)."""
         for agent, a in list(self.agents.items()):
+            if a.get("own") and await self._is_handoff(a["own"]):
+                log(f"agent {agent[:12]}: daemon exit, handoff tab kept"); continue
             if a.get("own"):
                 try: await asyncio.wait_for(self.cdp.send_raw("Target.closeTarget", {"targetId": a["own"]}), timeout=3)
                 except Exception: pass
@@ -349,11 +351,23 @@ class Daemon:
         log(f"agent {agent[:12]}: own tab {tid} window={AGENT_WINDOW}")
         return a
 
+    async def _is_handoff(self, tid):
+        """Вкладка-передача владельцу («👉 …» в заголовке): агент заполнил форму и ждёт его капчу/клик.
+        Её не закрываем ни по простою, ни при выходе демона — только забываем (09.11, grants-push-1109:
+        вкладки eGain/Meridian/Akamai пропадали через 30 мин, владелец находил пустоту)."""
+        try:
+            r = await asyncio.wait_for(self.cdp.send_raw("Target.getTargetInfo", {"targetId": tid}), timeout=5)
+            return (r.get("targetInfo") or {}).get("title", "").lstrip().startswith("\U0001F449")
+        except Exception:
+            return False
+
     async def _gc_agents(self):
         now = time.time()
         for agent, a in list(self.agents.items()):
             if now - a["last"] < AGENT_IDLE: continue
             del self.agents[agent]
+            if a.get("own") and await self._is_handoff(a["own"]):
+                log(f"agent {agent[:12]}: idle, handoff tab kept for owner"); continue
             if a.get("own"):
                 try: await self.cdp.send_raw("Target.closeTarget", {"targetId": a["own"]})
                 except Exception: pass
