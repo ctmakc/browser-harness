@@ -5,6 +5,8 @@ description: Direct browser control via CDP. Use when the user wants to automate
 
 # browser-harness
 
+> **Пароли из Chrome подставляй сам (закон владельца 13.11.2026, для всех агентов).** Форма просит пароль владельца (вход, «подтвердите паролем», Confirm) и он сохранён в Chrome → `fill_saved_password('<css поля>')` (несколько логинов у сайта — `pick=2…`). Это настоящий клик + подсказка Chrome + системные клавиши (XTest): пароль ложится в поле, агент его текста не видит. Вернуло True → жми кнопку сам. False (пароль не сохранён, фокус ушёл) → только тогда просить владельца. Менеджер паролей Chrome для скриптов по-прежнему закрыт (аудит 05.11), value поля не читать и не печатать. Только Chrome владельца на этой машине.
+
 > **Chrome владельца закрыт для агентов (22.09.2026).** Анкеты, формы, регистрации, заявки, любые сайты без его личного логина → `tanya-harness <<'PY' ... PY` (те же helpers, Chrome Тани на claw). `browser-harness` из агентской сессии без `BH_OWNER_WHY="…"` отвечает кодом 64. Причину ставить только когда нужен именно залогиненный кабинет владельца; каждый такой запуск пишется в `~/.local/state/browser-harness/owner-chrome.log`.
 
 > **Своя вкладка на агента (22.09.2026).** Демон узнаёт агента по `BU_AGENT` / `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `TMUX_PANE` и держит ему свою текущую вкладку: чужой `switch_tab` её больше не уводит. В Chrome Тани (`BU_AGENT_WINDOW=1`) у каждого агента своё окно. В Chrome владельца агентская вкладка фоновая, `switch_tab` её на передний план не выдёргивает (`BU_ACTIVATE=0`). Закрыл вспомогательную вкладку → следующая команда вернётся в свою основную. Вкладки агентов, простоявших 30 мин, демон закрывает сам. `ensure_real_tab()` у агента остаётся в своей вкладке. Без id (кроны) — старая общая вкладка. Очередь flock остаётся: один скрипт за раз на браузер.
@@ -169,7 +171,7 @@ The *durable* shape of the site — the map, not the diary. Focus on what the ne
 - **Verification**: `print(page_info())` is the simplest "is this alive?" check, but screenshots are the default way to verify whether a visible action actually worked.
 - **DOM reads**: use `js(...)` for inspection and extraction when the screenshot shows that coordinates are the wrong tool.
 - **Iframe sites** (Azure blades, Salesforce): `click(x, y)` passes through; only drop to iframe DOM work when coordinate clicks are the wrong tool.
-- **Auth wall**: redirected to login → stop and ask the user. Don't type credentials from screenshots.
+- **Auth wall**: redirected to login → `fill_saved_password()` in the password field (Chrome's saved login), then submit. Only if it returns False → stop and ask the user. Don't type credentials from screenshots.
 - **Raw CDP** for anything helpers don't cover: `cdp("Domain.method", **params)`.
 
 ## Design constraints

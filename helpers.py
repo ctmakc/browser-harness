@@ -220,6 +220,37 @@ def open_url(url, match=None, reload=False):
     goto(url); wait_for_load()
     return {"reused": False, "url": url}
 
+def fill_saved_password(selector='input[type="password"]', pick=1):
+    """Подставить в поле пароль, сохранённый в Chrome владельца (закон владельца 13.11.2026: «пароли сохранены
+    в гугле — подставляй сам», для всех агентов). Как человек: настоящий клик в поле → Chrome показывает свою
+    подсказку (логин •••) → XTest-клавиши Down×pick + Tab выбирают её (Tab безопасен: без подсказки форма не уйдёт).
+    Текст пароля агент не видит и не печатает; менеджер паролей Chrome для скриптов закрыт (daemon.py, аудит 05.11) —
+    это единственный разрешённый путь. pick — номер строки подсказки, если у сайта несколько логинов.
+    Вкладка на миг выходит на передний план. True — поле заполнилось. Только Chrome владельца на этой машине (X :0);
+    в Chrome Тани на claw не работает. Форму дальше отправляет агент сам."""
+    import subprocess
+    sel = json.dumps(selector)
+    r = js(f"(()=>{{const i=document.querySelector({sel});if(!i)return null;i.scrollIntoView({{block:'center'}});"
+           f"i.blur();const b=i.getBoundingClientRect();return [b.x+Math.min(40,b.width/3),b.y+b.height/2,i.value.length]}})()")
+    if not r:
+        raise RuntimeError(f"fill_saved_password: нет поля {selector}")
+    if r[2]:
+        return True
+    cdp("Target.activateTarget", targetId=current_tab()["targetId"])
+    try: cdp("Page.bringToFront")
+    except Exception: pass
+    time.sleep(0.8)
+    click(r[0], r[1]); time.sleep(1.2)
+    try:
+        p = subprocess.run(["/usr/bin/python3", str(Path(__file__).parent / "xkeys.py"),
+                            *(["Down"] * max(1, pick)), "Tab"], timeout=20)
+        if p.returncode:
+            return False
+    except Exception as e:
+        print("fill_saved_password:", e); return False
+    time.sleep(0.8)
+    return bool(js(f"(document.querySelector({sel})||{{}}).value?.length||0"))
+
 def human_pause(lo=0.8, hi=2.5):
     """Случайная пауза между действиями, чтобы ритм был человеческим."""
     import random; time.sleep(random.uniform(lo, hi))
