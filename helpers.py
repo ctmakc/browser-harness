@@ -27,7 +27,23 @@ ACTIVATE = os.environ.get("BU_ACTIVATE", "1") != "0"
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 
 
+_GATE_AT = 0.0
+
+
+def _night_gate():
+    # 18.11: ночной предохранитель Chrome владельца (nightgate.py) и для скриптов, импортирующих helpers
+    # напрямую мимо run.py. Решение раз в 30 мин на процесс: прогон, начатый ночью, не рвётся в 07:00.
+    global _GATE_AT
+    if time.time() - _GATE_AT < 1800: return
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    import nightgate
+    nightgate.check()
+    _GATE_AT = time.time()
+
+
 def _send(req):
+    _night_gate()
     if AGENT: req = {**req, "agent": AGENT}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(float(os.environ.get("BU_CALL_TIMEOUT", "60")) + 30)  # демон сам режет вызов на BU_CALL_TIMEOUT

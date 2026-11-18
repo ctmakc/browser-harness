@@ -36,6 +36,9 @@ def main():
             "  print(page_info())\n"
             "  PY"
         )
+    sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+    import nightgate
+    nightgate.check()  # 18.11: Chrome владельца днём закрыт для кронов (07:00–23:00), код 75
     ensure_daemon()
     exec(sys.stdin.read())
 
