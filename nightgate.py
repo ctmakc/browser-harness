@@ -40,6 +40,8 @@ PASSIVE_WHY_RX = re.compile(r"^rbc-statements-pull:")
 # интерактивный агент: окно терминала на экране владельца (logind session-*.scope), его Telegram-канал,
 # удалённое управление — с ним говорит сам владелец. Разосланные оркестратором (tmux-spawn-*, osmozg-front-*) — нет.
 INTERACTIVE_RX = re.compile(r"^(session-\w+\.scope|telegram-channel\.service|claude-rc\.service|claude-term-ttyd\.service)$")
+# живой коннектор владельца: ChatGPT зовёт инструмент, когда владелец сам пишет в чат (18.11 17:02 отбит зря)
+OWNER_LIVE = {("chatgpt-browser-mcp.service", "chatgpt-mcp")}
 AGENT_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "GEMINI_CLI", "CODEX_THREAD_ID")
 
 
@@ -95,6 +97,8 @@ def decide(env=os.environ, t=None, tty=None, unit=None):
         return True, "ночь"
     agent = env.get("BU_AGENT", "")
     why = env.get("BH_OWNER_WHY", "")
+    if ((unit if unit is not None else _unit()), agent) in OWNER_LIVE:
+        return True, "живой коннектор владельца (его ChatGPT)"
     if agent and CRON_AGENT_RX.match(agent):
         return False, f"BU_AGENT={agent} в списке кронов"
     if why and PASSIVE_WHY_RX.match(why) and not agent:
