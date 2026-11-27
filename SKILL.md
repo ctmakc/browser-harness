@@ -92,6 +92,20 @@ Profiles (cookies-only login state) live in `interaction-skills/profile-sync.md`
 
 `browser-harness` and `tanya-harness` hold `flock /tmp/bu-<BU_NAME>.lock` for the whole script: one script per profile at a time, others wait up to `BU_LOCK_WAIT` (900 s), then exit 75 ("did not get the browser", not "browser broken"). Keep scripts short. Your own agent tab survives between scripts, so the next script continues on the same page (`open_url`). Close the tab once, at the end of the task (`finish_task()`), and close any extra helper tab you opened yourself. Never spin a second driver on the same profile.
 
+### Аренда Chrome владельца на задачу (правило 26.11.2026)
+
+Владелец 26.11 23:16: «один агент в фейсбуке посты делает, другой дёргает ads manager… раздублитесь, договоритесь друг с другом». Замок `flock` держит только один вызов; между вызовами чужая задача вклинивалась, и окна с вкладками перемешивались. Теперь Chrome владельца (профиль `default`, :9222) в каждый момент **у одной задачи**:
+
+- Первый вызов задачи берёт аренду: кто держит, зачем (`BH_OWNER_WHY`), с какого времени. Каждый следующий вызов продлевает её. Без вызовов она живёт 10 минут и снимается сама; пока вызов идёт, не стареет.
+- `finish_task()` в конце задачи снимает аренду сразу, следующая задача из очереди заходит в течение 2 секунд. Не зовёшь `finish_task()` — держишь Chrome ещё 10 минут после последнего вызова.
+- Держатель — `BH_LEASE_HOLDER`, иначе имя в term-hub (`TERM_HUB_NAME`), иначе сессия агента (субагенты одной сессии — одна задача), иначе `BU_AGENT` крона, иначе юнит systemd.
+- Занято чужой задачей: агент ждёт в очереди до `BH_LEASE_WAIT` секунд (по умолчанию 90), по порядку прихода; не дождался — **код 75** и строка «занят задачей «…» (зачем), держит с ЧЧ:ММ, последний вызов ЧЧ:ММ, снимется сама в ЧЧ:ММ». Окна и вкладки ждущего в Chrome не появляются: отказ случается до подключения к Chrome. Агент на 75 делает другую часть работы и повторяет позже; держателя не трогает.
+- Кроны и таймеры не ждут: при занятости сразу код 75, проход пропускают.
+- Владелец сам (человек в терминале, его живой ChatGPT-коннектор) аренду не берёт и не ждёт. Замок «владелец за компьютером» (`owner-at-desk`, nightgate) и ночное окно 23:00–07:00 проверяются раньше аренды.
+- Статус: `python3 /home/llm/Developer/browser-harness/lease.py status`. Снять зависшую аренду чужой задачи (только фронт, после проверки, что держатель не работает): `lease.py release --force --why "<почему>"`.
+- Журнал `~/.local/state/browser-harness/lease.log`: `TAKE` (взял), `WAIT` (встал в очередь), `BUSY75` (отказ), `RELEASE` (снял: finish_task или простой 10 мин). Состояние — `lease-default.json` там же.
+- Скрипты, импортирующие `helpers` напрямую мимо обёртки, берут и продлевают аренду сами при вызовах в Chrome (раз в 30 с).
+
 ### Downloads (закон владельца 25.07 и 02.10.2026)
 
 На Chrome владельца `Browser.setDownloadBehavior` / `Page.setDownloadBehavior` запрещены полностью, демон их отклоняет. Причина в Chromium: первый же такой вызов (любой behavior, даже `default`) до перезапуска Chrome подменяет менеджер загрузок профиля на `DevToolsDownloadManagerDelegate`, а тот не умеет `OpenDownload`/`ShowDownloadInShell` — у владельца «Открыть» и «Показать в папке» молча перестают работать для всех файлов. С `allow` к тому же все его загрузки уходят в папку агента. Обе беды были 25.07 и 01–02.10.2026, лечится только перезапуском Chrome.

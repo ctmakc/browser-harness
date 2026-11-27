@@ -42,8 +42,27 @@ def _night_gate():
     _GATE_AT = time.time()
 
 
+_LEASE_AT = 0.0
+_LEASE_GONE = False   # finish_task() сняла аренду: дальнейшие вызовы этого процесса берут её заново
+
+
+def _lease():
+    # 26.11: аренда Chrome владельца на задачу (lease.py). Через обёртку browser-harness аренду уже взял
+    # шелл (BH_LEASE_HELD=1, его PID держит её живой). Скрипт, импортирующий helpers напрямую, берёт/продлевает
+    # её сам раз в 30 с вызовов; занято и не дождались — выход с кодом 75 до первой команды в Chrome.
+    global _LEASE_AT
+    if (os.environ.get("BH_LEASE_HELD") == "1" and not _LEASE_GONE) or time.time() - _LEASE_AT < 30: return
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    import lease
+    rc = lease.acquire(pid=0)
+    if rc: raise SystemExit(rc)
+    _LEASE_AT = time.time()
+
+
 def _send(req):
     _night_gate()
+    _lease()
     if AGENT: req = {**req, "agent": AGENT}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(float(os.environ.get("BU_CALL_TIMEOUT", "60")) + 30)  # демон сам режет вызов на BU_CALL_TIMEOUT
@@ -272,15 +291,31 @@ def human_pause(lo=0.8, hi=2.5):
     import random; time.sleep(random.uniform(lo, hi))
 
 def finish_task():
-    """Конец ЗАДАЧИ (не скрипта): увести свою вкладку на about:blank (страница выгружается).
+    """Конец ЗАДАЧИ (не скрипта): увести свою вкладку на about:blank (страница выгружается) и снять
+    аренду Chrome владельца (lease.py) — следующая задача в очереди заходит сразу.
     Саму вкладку не закрываем: демон помнит её id, а простоявшую 30 мин закроет сам."""
-    if not AGENT: return
     try:
-        if (js("document.title") or "").lstrip().startswith("\U0001F449"):
-            return  # вкладка-передача владельцу («👉 …»): форма ждёт его капчу/клик, не выгружать
-    except Exception:
-        pass
-    goto("about:blank")
+        if not AGENT: return
+        try:
+            if (js("document.title") or "").lstrip().startswith("\U0001F449"):
+                return  # вкладка-передача владельцу («👉 …»): форма ждёт его капчу/клик, не выгружать
+        except Exception:
+            pass
+        goto("about:blank")
+    finally:
+        _lease_release()
+
+
+def _lease_release():
+    global _LEASE_AT, _LEASE_GONE
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        import lease
+        lease.release(why="finish_task")
+        _LEASE_AT, _LEASE_GONE = 0.0, True
+    except Exception as e:
+        print("finish_task: аренду не снял:", e)
 
 def iframe_target(url_substr):
     """First iframe target whose URL contains `url_substr`. Use with js(..., target_id=...)."""
