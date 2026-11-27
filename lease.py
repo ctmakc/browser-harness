@@ -9,6 +9,8 @@
   * Каждый вызов держателя продлевает аренду; без вызовов она живёт LEASE_IDLE (10 мин) и снимается сама.
     Пока вызов держателя идёт (его PID жив), аренда не стареет.
   * finish_task() снимает аренду сразу.
+  * Держит крон/таймер, а в очереди ждут: через TIMER_GRACE (60 с) без его вызова аренда уходит очереди
+    (иначе таймер с проходом каждые 5 мин держит Chrome вечно).
   * Остальные встают в очередь: агенты ждут до BH_LEASE_WAIT сек (90), кроны и таймеры не ждут;
     не дождались — код 75 и строка «занято: кем, зачем, до скольки, ваше место в очереди».
     Очередь — те, кто ждёт прямо сейчас (живой PID), по порядку прихода; ушедший теряет место.
@@ -33,6 +35,7 @@ HOME = Path(os.environ.get("HOME", "/home/llm"))
 STATE = HOME / ".local/state/browser-harness"
 LOG = STATE / "lease.log"
 LEASE_IDLE = int(os.environ.get("BH_LEASE_IDLE", "600"))      # 10 мин простоя — аренда снимается
+TIMER_GRACE = 60                                               # крон/таймер уступает ждущим после 60 с без вызова
 AGENT_WAIT = 90                                                # агенты по умолчанию ждут 90 с
 EXIT_BUSY = 75                                                 # EX_TEMPFAIL, как у nightgate и flock
 POLL = 2.0
@@ -185,7 +188,17 @@ def _expire(st, now):
     lease = st.get("lease")
     if lease:
         lease["active"] = [p for p in lease.get("active", []) if _alive(p)]
-        if not lease["active"] and now - lease.get("last", 0) >= LEASE_IDLE:
+        waiting = any(w.get("pid") and _alive(w["pid"]) and w["id"] != lease["id"] for w in st["queue"])
+        kind = lease.get("kind") or ("agent" if lease["id"][:2] in ("s:", "t:", "h:") else "timer")
+        if not lease["active"] and kind == "timer" and waiting \
+                and now - lease.get("last", 0) >= TIMER_GRACE:
+            # 27.11 00:10: таймер academl-comment-dm продлевал аренду каждым проходом и держал Chrome час,
+            # агенты в очереди не дожидались. Проход таймера закончен — уступает очереди.
+            _log("RELEASE", lease, f"таймер уступил очереди: {TIMER_GRACE} с без вызова, держал с "
+                                   f"{_hm(lease.get('since', now))}, вызовов {lease.get('calls', 0)}")
+            st["lease"] = None
+            changed = True
+        elif not lease["active"] and now - lease.get("last", 0) >= LEASE_IDLE:
             _log("RELEASE", lease, f"простой {LEASE_IDLE // 60} мин, последний вызов {_hm(lease.get('last', now))}"
                                    f", держал с {_hm(lease.get('since', now))}")
             st["lease"] = None
@@ -248,7 +261,8 @@ def acquire(pid=None, env=os.environ, wait=None):
                     ahead.append(w)
             if not lease and not ahead:                  # свободно и мы первые — берём
                 st["lease"] = {"id": me_id, "name": me_name, "why": why, "since": now, "last": now,
-                               "active": [pid] if pid else [], "calls": 1, "unit": _unit() or "-"}
+                               "active": [pid] if pid else [], "calls": 1, "unit": _unit() or "-",
+                               "kind": "agent" if _in_agent(env) else "timer"}
                 st["queue"] = [w for w in st["queue"] if w["id"] != me_id]
                 L.save()
                 _log("TAKE", st["lease"], f"ждал в очереди {now - first_try:.0f} с" if logged else "")
